@@ -17,7 +17,7 @@ A reusable GitHub Action that uses Claude AI to evaluate input content against a
 ```yaml
 - name: AI Evaluate
   id: ai_eval
-  uses: ./.github/actions/ai-evaluate
+  uses: kickthemooon/ai-evaluate@0.0.2
   with:
     prompt: |
       You are an expert code reviewer.
@@ -48,7 +48,7 @@ A reusable GitHub Action that uses Claude AI to evaluate input content against a
 
 - name: AI Review PR
   id: ai_review
-  uses: ./.github/actions/ai-evaluate
+  uses: kickthemooon/ai-evaluate@0.0.2
   with:
     prompt: |
       You are a senior engineer reviewing pull requests.
@@ -64,7 +64,7 @@ A reusable GitHub Action that uses Claude AI to evaluate input content against a
 
 ```yaml
 - name: AI Evaluate
-  uses: ./.github/actions/ai-evaluate
+  uses: kickthemooon/ai-evaluate@0.0.2
   with:
     prompt: "Your evaluation criteria here..."
     input: "Content to evaluate"
