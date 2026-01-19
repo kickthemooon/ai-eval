@@ -78,7 +78,7 @@ A reusable GitHub Action that uses Claude AI to evaluate input content against a
 | `prompt` | System prompt defining the evaluation criteria | ✅ Yes | - |
 | `input` | Direct text input to evaluate | ❌ No* | `''` |
 | `input_file` | Path to a text file to evaluate | ❌ No* | `''` |
-| `model` | Claude model to use | ❌ No | `claude-sonnet-4-20250514` |
+| `model` | Claude model to use | ❌ No | `claude-opus-4-5-20251101` |
 | `max_input_chars` | Maximum input characters (truncated if exceeded) | ❌ No | `50000` |
 | `anthropic_api_key` | Anthropic API key | ❌ No | Uses `ANTHROPIC_API_KEY` env var |
 
