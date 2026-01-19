@@ -1,0 +1,220 @@
+name: 'AI Evaluate'
+description: 'Evaluate input content using Anthropic AI and return an approval decision with reasoning'
+author: 'DevOps Team'
+
+branding:
+  icon: 'check-circle'
+  color: 'purple'
+
+inputs:
+  prompt:
+    description: 'System prompt defining the evaluation criteria'
+    required: true
+  input:
+    description: 'Direct text input to evaluate (mutually exclusive with input_file)'
+    required: false
+    default: ''
+  input_file:
+    description: 'Path to a text file to evaluate (mutually exclusive with input)'
+    required: false
+    default: ''
+  model:
+    description: 'Anthropic model to use for evaluation'
+    required: false
+    default: 'claude-opus-4-5-20251101'
+  max_input_chars:
+    description: 'Maximum characters for input (will be truncated if exceeded)'
+    required: false
+    default: '50000'
+  anthropic_api_key:
+    description: 'Anthropic API key (can also use ANTHROPIC_API_KEY env var)'
+    required: false
+    default: ''
+
+outputs:
+  approved:
+    description: 'Whether the input was approved (true/false)'
+    value: ${{ steps.evaluate.outputs.approved }}
+  reason:
+    description: 'Explanation for the decision'
+    value: ${{ steps.evaluate.outputs.reason }}
+  response_json:
+    description: 'Full JSON response from the AI'
+    value: ${{ steps.evaluate.outputs.response_json }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate inputs
+      shell: bash
+      run: |
+        INPUT="${{ inputs.input }}"
+        INPUT_FILE="${{ inputs.input_file }}"
+
+        if [ -z "$INPUT" ] && [ -z "$INPUT_FILE" ]; then
+          echo "::error::Either 'input' or 'input_file' must be provided"
+          exit 1
+        fi
+
+        if [ -n "$INPUT" ] && [ -n "$INPUT_FILE" ]; then
+          echo "::error::Only one of 'input' or 'input_file' should be provided, not both"
+          exit 1
+        fi
+
+        if [ -n "$INPUT_FILE" ] && [ ! -f "$INPUT_FILE" ]; then
+          echo "::error::Input file not found: $INPUT_FILE"
+          exit 1
+        fi
+
+    - name: Evaluate with AI
+      id: evaluate
+      shell: bash
+      env:
+        INPUT_ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        INPUT_PROMPT: ${{ inputs.prompt }}
+        INPUT_CONTENT: ${{ inputs.input }}
+        INPUT_FILE: ${{ inputs.input_file }}
+        INPUT_MODEL: ${{ inputs.model }}
+        INPUT_MAX_CHARS: ${{ inputs.max_input_chars }}
+      run: |
+        set -euo pipefail
+
+        # Determine API key (input takes precedence over env var)
+        if [ -n "$INPUT_ANTHROPIC_API_KEY" ]; then
+          API_KEY="$INPUT_ANTHROPIC_API_KEY"
+        elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+          API_KEY="$ANTHROPIC_API_KEY"
+        else
+          echo "::error::No Anthropic API key provided. Set 'anthropic_api_key' input or ANTHROPIC_API_KEY environment variable."
+          exit 1
+        fi
+
+        # Get input content from file or direct input
+        if [ -n "$INPUT_FILE" ]; then
+          CONTENT=$(cat "$INPUT_FILE")
+          echo "Reading input from file: $INPUT_FILE"
+        else
+          CONTENT="$INPUT_CONTENT"
+          echo "Using direct input"
+        fi
+
+        # Truncate if necessary
+        MAX_CHARS="$INPUT_MAX_CHARS"
+        CONTENT_LENGTH=${#CONTENT}
+        if [ "$CONTENT_LENGTH" -gt "$MAX_CHARS" ]; then
+          CONTENT="${CONTENT:0:$MAX_CHARS}...[truncated]"
+          echo "::warning::Input was truncated from $CONTENT_LENGTH to $MAX_CHARS characters"
+        else
+          echo "Input length: $CONTENT_LENGTH characters"
+        fi
+
+        # Prepare the user prompt
+        USER_PROMPT="Please evaluate the following input:
+
+        \`\`\`
+        $CONTENT
+        \`\`\`"
+
+        # Create request payload using jq for proper JSON escaping
+        REQUEST_PAYLOAD=$(jq -n \
+          --arg model "$INPUT_MODEL" \
+          --arg system "$INPUT_PROMPT" \
+          --arg user "$USER_PROMPT" \
+          '{
+            model: $model,
+            max_tokens: 10000,
+            system: $system,
+            messages: [{role: "user", content: $user}],
+            output_format: {
+              type: "json_schema",
+              schema: {
+                type: "object",
+                properties: {
+                  approved: {type: "boolean"},
+                  reason: {type: "string"}
+                },
+                required: ["approved", "reason"],
+                additionalProperties: false
+              }
+            }
+          }')
+
+        echo "Calling Claude API with model: $INPUT_MODEL"
+
+        # Call Claude API with Structured Outputs
+        HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://api.anthropic.com/v1/messages" \
+          -H "Content-Type: application/json" \
+          -H "x-api-key: $API_KEY" \
+          -H "anthropic-version: 2023-06-01" \
+          -H "anthropic-beta: structured-outputs-2025-11-13" \
+          -d "$REQUEST_PAYLOAD")
+
+        # Extract HTTP status code and response body
+        HTTP_STATUS=$(echo "$HTTP_RESPONSE" | tail -n1)
+        RESPONSE=$(echo "$HTTP_RESPONSE" | sed '$d')
+
+        echo "API Response Status: $HTTP_STATUS"
+
+        # Check for HTTP errors
+        if [ "$HTTP_STATUS" -ne 200 ]; then
+          echo "::error::Claude API returned HTTP $HTTP_STATUS"
+          echo "Response: $RESPONSE"
+          echo "approved=false" >> $GITHUB_OUTPUT
+          echo "reason=AI evaluation failed - API returned HTTP $HTTP_STATUS" >> $GITHUB_OUTPUT
+          {
+            echo "response_json<<EOF"
+            echo "{\"error\": \"API returned HTTP $HTTP_STATUS\", \"response\": $(echo "$RESPONSE" | jq -c '.' 2>/dev/null || echo "\"$RESPONSE\"")}"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+          exit 1
+        fi
+
+        # Extract the text response from Claude's response format
+        AI_TEXT=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
+
+        if [ -z "$AI_TEXT" ]; then
+          echo "::error::AI evaluation failed - no response content from Claude API"
+          echo "Full API Response: $RESPONSE"
+          echo "approved=false" >> $GITHUB_OUTPUT
+          echo "reason=AI evaluation failed - no response content from API" >> $GITHUB_OUTPUT
+          {
+            echo "response_json<<EOF"
+            echo "{\"error\": \"No response content\", \"raw_response\": $(echo "$RESPONSE" | jq -c '.')}"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+          exit 1
+        fi
+
+        echo "AI Response received successfully"
+
+        # Parse the structured JSON response
+        APPROVED=$(echo "$AI_TEXT" | jq -r '.approved // false')
+        REASON=$(echo "$AI_TEXT" | jq -r '.reason // "No reason provided"')
+
+        # Set outputs
+        echo "approved=$APPROVED" >> $GITHUB_OUTPUT
+
+        # Use heredoc for reason (may contain newlines and special characters)
+        {
+          echo "reason<<EOF"
+          echo "$REASON"
+          echo "EOF"
+        } >> $GITHUB_OUTPUT
+
+        # Use heredoc for full JSON response
+        {
+          echo "response_json<<EOF"
+          echo "$AI_TEXT"
+          echo "EOF"
+        } >> $GITHUB_OUTPUT
+
+        # Log result
+        if [ "$APPROVED" = "true" ]; then
+          echo "✅ AI Evaluation: APPROVED"
+        else
+          echo "❌ AI Evaluation: REJECTED"
+        fi
+        echo "----------------------------------------"
+        echo "Reason:"
+        echo "$REASON"
+        echo "----------------------------------------"
